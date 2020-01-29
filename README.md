@@ -26,7 +26,7 @@ val startDate = "20200101" // 시작날짜
   val fuelList = Seq("G","D","null") // 연료타입
 //  val savePath = "vcrm_7000066.test_tm_20200121_t" // 하이브에 저장할 테이블 이름 (외주분석계)
 //  val savePath = "vcrm_7000066.test_tm_20200122_t" // 하이브에 저장할 테이블 이름 (외주분석계)
-  val savePath = "vcrm_7000066.test_tm_20200129_t" // 하이브에 저장할 테이블 이름 (통합분석계)
+  val savePath = "vcrm_7000066.test_tm_20200129_t_" // 하이브에 저장할 테이블 이름 (통합분석계)
   val tipLengthThread = 8 // 최소 시그널 길이
   val signals = { //파싱할 시그널들
     Seq("EMS11.VS", "SAS11_FS.SAS_Angle")}
@@ -88,12 +88,14 @@ val startDate = "20200101" // 시작날짜
 //  parsed.sort($"vin"왜 parsed에다가 where절을 넣어야하는지?
 
   //test!!! 2020.01.29
-  //peopleDf.where($"age" > 15)
+  //peopleDf.where($"age" > 15) 오류 코드
+/*
   parsed.select("vin").show(1)
   parsed.select("ignitiontime").show(1)
   parsed.where("ignitiontime").show(1)
   parsed.filter(col("ignitiontime")<"2020-01-01 16:00").show(1)
   parsed.filter(col("ignitiontime")>"2020-01-01 14:00").show(3)
+*/
 
   val parsed2 = parsed.filter(col("ignitiontime")>"2020-01-01 13:00")
   val parsed3 = parsed2.filter(col("ignitiontime")<"2020-01-01 15:00")
@@ -165,3 +167,4 @@ val startDate = "20200101" // 시작날짜
   }
 
 row_df.write.format("parquet").mode("overwrite").saveAsTable(savePath)
+
