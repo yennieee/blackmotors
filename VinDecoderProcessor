@@ -1,0 +1,196 @@
+package com.hkmc.bigdata.vcrm.commons.spark.modules.vindecode.processors
+
+import com.hkmc.bigdata.vcrm.commons.spark.modules.vindecode.parser.VinDecoder
+import com.hkmc.bigdata.vcrm.commons.spark.modules.vindecode.writer.VinDecodeWriter
+import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.{Dataset, Row, SQLContext}
+
+/**
+  * 차대번호를 받아 사용자가 지정한 차량정보를 디코딩한다.
+  *
+  *
+  * <strong>▶ 사용예 :</strong>
+  * <pre>
+  * val processor = new VinDecodeProcessor(sqlContext)
+  *   .setVinColumnName("vin")
+  *   .setVINSpecConfig("/user/hive/warehouse/hkmg_tms.db", false)
+  *   .setDecodingColumns(Seq("corp", "kind", "cars"))
+  *
+  * val vins = processor.decodeRow("KMHGM41XXXX000000")
+  * </pre>
+  *
+  *
+  * <strong>▶ 조회결과 :</strong>
+  * <pre>
+  * [HMC,승용,DH]
+  * </pre>
+  *
+  * @param sqlContext SQLContext
+  * @param pathOrSql 차량 디코딩 스펙파일 경로 또는 하이브 조회쿼리<br>
+  *                  - 'select'로 시작하면 하이브 쿼리로 인식<br>
+  *                  - 쿼리일 경우 : 'select 1, 2'<br>
+  *                                 -> 1 = spec type(xxebom_oavinbsm_bs_json)<br>
+  *                                 -> 2 = Json 문자열<br>
+  *                  - spec type : xxebom_oavinbsm_bs_json<br>
+  *                                xxebom_oavinvd5_bs_json<br>
+  *                                xxebom_oavinvd6_bs_json<br>
+  *                                xxebom_oavinvd7_bs_json<br>
+  *                                xxebom_oavinvd8_bs_json<br>
+  *                                xxebom_oavinvd9_bs_json<br>
+  *                                xxebom_oavinvia_bs_json<br>
+  *                                xxebom_oavinvib_bs_json<br>
+  */
+class VinDecodeProcessor(sqlContext: SQLContext, pathOrSql: String) extends Serializable {
+
+  private val MAPPING_COLUMNS: Map[String, String] = Map(
+    "cars" -> "prj_vehl_cd",
+    "engn" -> "eng_full_name",
+    "modl" -> "mdy"
+  )
+
+  private val SPEC_COLUMNS: Seq[String] = Seq(
+    "corp", "kind", "regn", "spec", //BSM +spec
+    "specNo", "cars", "prj_vehl_cd", "grad", //VD5(Base) +specNo, -cars
+    "bdcb", "chas", "wegt", //VD6
+    "belt", //VD7
+    // 2019.12.06 eng_full_name -> engname 변경, ohc, engcat 사용중지
+    "engn", "engname", "fuel", "capacity", "specname", //VD8 +specname, -engn
+    "ckdr", "desc", "hd", "tm", //VD9 +desc
+    "modl", "mdy", //VIA -modl
+    "plnt" //VIB
+  )
+
+  private var decoder: VinDecoder = new VinDecoder(sqlContext, pathOrSql)
+  private var vinColumnName: String = "vin"
+  private var columns: Seq[String] = SPEC_COLUMNS.map(col => {
+    if (MAPPING_COLUMNS.contains(col)) MAPPING_COLUMNS.get(col).get else col
+  }).distinct
+
+  /**
+    * 데이터셋을 받아 VIN 디코딩 한 후, 차량정보가 포함된 데이터셋을 반환한다.
+    *
+    * @param ds  차량정보를 디코딩할 차대번호가 포함된 데이터셋
+    * @return  차량정보가 포함된 데이터셋
+    */
+  def processDS(ds: Dataset[Row]) = {
+    val df = processDF(ds)
+    df.as(RowEncoder(df.schema))
+  }
+
+  /**
+    * 데이터셋을 받아 VIN 디코딩 한 후, 차량정보가 포함된 데이터프레임을 반환한다.
+    *
+    * @param ds  차량정보를 디코딩할 차대번호가 포함된 데이터셋
+    * @return  차량정보가 포함된 데이터프레임
+    */
+  def processDF(ds: Dataset[Row]) = {
+    val vinColumnIndex = ds.schema.fieldNames.indexOf(vinColumnName)
+
+    val rdd = ds.rdd.mapPartitions(iter => {
+      iter.flatMap(row => {
+        val decodingColumns = decodeVin(row.getString(vinColumnIndex))
+        Seq(Row.fromSeq(row.toSeq ++ decodingColumns))
+      })
+    })
+
+    val schema = evalSchema(ds.schema)
+    sqlContext.createDataFrame(rdd, schema)
+  }
+
+  /**
+    * 차대번호를 받아 디코딩된 차량정보를 Seq[String] 타입으로 반환한다.
+    *
+    * @param vin  차대번호
+    * @return  Seq[String]
+    */
+  def decodeVin(vin: String): Seq[String] = {
+    if (vin == null || vin.trim.length < 11) return Seq.empty
+    val decodedData = this.decoder.decode(vin)
+    columns.map(column => decodedData.getOrElse(column, null))
+  }
+
+  /**
+    * 차대번호를 받아 디코딩된 차량정보를 Row 타입으로 반환한다.
+    *
+    * @param vin  차대번호
+    * @return  Row
+    */
+  def decodeRow(vin: String): Row = Row.fromSeq(decodeVin(vin))
+
+  /**
+    * 데이터셋의 VIN 데이터의 필드이름을 지정한다.
+    *
+    * @param vinColumnName  데이터셋의 vin 필드의 이름, 기본값은 'vin'
+    * @return
+    */
+  def setVinColumnName(vinColumnName: String) : VinDecodeProcessor = {
+    this.vinColumnName = vinColumnName
+    this
+  }
+
+  /**
+    * json 파일 경로 및 update 여부를 지정한다.
+    *
+    * @param updateFlag  새로 json 파일을 지정 위치에 생성 할지(True) 또는 기존 파일을 그대로 사용할지(False)
+    * @return
+    */
+  def setVINSpecConfig(jsonDir: String, updateFlag: Boolean = false): VinDecodeProcessor = {
+    if (! updateFlag) return this
+    new VinDecodeWriter(sqlContext).write(pathOrSql)
+    this.decoder = new VinDecoder(sqlContext, jsonDir)
+    this
+  }
+
+  /**
+    * 디코딩 할 컬럼을 지정한다.
+    *
+    * @param decodingColumns  디코딩할 columns (empty 일경우 모든 컬럼 다 디코딩)
+    *                 - corp           회사 명
+    *                 - kind           차량 종류
+    *                 - prj_vehl_cd    차종 코드(PRJ_VEHL_CD)
+    *                 - grad           트림 레벨
+    *                 - mdy            양산 년도
+    *                 - fuel           연료 타입
+    *                 - capacity       연료 버전
+    *                 - ohc            Overhead Camshaft Engine
+    *                 - engcat         엔진 명
+    *                 - engname        엔진 버전
+    *                 - eng_full_name  FULL 엔진 명
+    *                 - hd             핸들
+    *                 - tm             TM 종류
+    *                 - ckdr           FULL 구속장치(HD + TM)
+    *                 - bdcb           차체
+    *                 - belt           벨트
+    *                 - chas           샤시
+    *                 - wegt           중량
+    *                 - plnt           생산공장
+    *                 - regn           대상지역
+    * @return
+    */
+  def setDecodingColumns(decodingColumns: Seq[String] = Seq.empty[String]) : VinDecodeProcessor = {
+    this.columns = SPEC_COLUMNS.filter(col => decodingColumns.find(_.equalsIgnoreCase(col)) != None).map(col => {
+      if (MAPPING_COLUMNS.contains(col)) MAPPING_COLUMNS.get(col).get else col
+    }).distinct
+
+    if (this.columns.isEmpty) throw new Exception("Enter the column to decode")
+    this
+  }
+
+  /**
+    * processDS 에서 리턴한 데이터 셋의 스키마정보를 리턴한다.
+    *
+    * @param schema  processDS 함수에 전달한 데이터셋 중 반환되는 데이터셋에 포함할 필드 목록
+    * @return  스키마 정보
+    */
+  def evalSchema(schema: StructType) : StructType = {
+    StructType(schema.toSeq ++ columns.map(StructField(_, StringType)))
+  }
+
+  /**
+    * 디코딩된 차량정보의 구조를 반환한다.
+    *
+    * @return  디코딩된 차량정보 스키마
+    */
+  def getDecodedColumns : Seq[String] = columns
+}
